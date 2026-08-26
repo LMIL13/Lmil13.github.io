@@ -346,11 +346,38 @@
   function getLocation(){
     return new Promise(function(resolve){
       if(!navigator.geolocation){ resolve(null); return; }
+      var settled = false;
+      function toResult(pos){
+        return {lat:pos.coords.latitude, lon:pos.coords.longitude, acc:pos.coords.accuracy, alt:pos.coords.altitude};
+      }
+      function fallbackLowAccuracy(){
+        navigator.geolocation.getCurrentPosition(
+          function(pos){
+            if(settled) return;
+            settled = true;
+            resolve(toResult(pos));
+          },
+          function(){
+            if(settled) return;
+            settled = true;
+            resolve(null);
+          },
+          {enableHighAccuracy:false, timeout:15000, maximumAge:60000}
+        );
+      }
       navigator.geolocation.getCurrentPosition(
         function(pos){
-          resolve({lat:pos.coords.latitude, lon:pos.coords.longitude, acc:pos.coords.accuracy, alt:pos.coords.altitude});
+          if(settled) return;
+          settled = true;
+          resolve(toResult(pos));
         },
-        function(){ resolve(null); },
+        function(){
+          // La haute precision (GPS pur) peut echouer ou expirer en interieur ;
+          // on retente avec une position moins precise (WiFi/reseau), comme le
+          // font les applications natives (ex: Plans), plutot que d'abandonner.
+          if(settled) return;
+          fallbackLowAccuracy();
+        },
         {enableHighAccuracy:true, timeout:8000, maximumAge:0}
       );
     });
@@ -657,6 +684,8 @@
     if(state.view === 'list'){
       actions.innerHTML =
         '<button class="btn btn-secondary btn-sm" data-action="export-csv" title="Exporter en CSV">&#8615; CSV</button>' +
+        '<button class="btn btn-secondary btn-sm" data-action="pick-import-fiche" title="Importer une fiche envoyee depuis un autre telephone">&#8613; Importer</button>' +
+        '<input type="file" accept="application/json,.json" style="display:none" data-role="import-fiche-input">' +
         '<button class="btn btn-primary btn-sm" data-action="new-entry">+ Nouvelle fiche</button>';
       root.innerHTML = storageBannerHtml() + renderList();
     } else if(state.view === 'form'){
@@ -901,6 +930,10 @@
       '<div style="display:flex;gap:10px;margin-top:4px;">' +
         '<button class="btn btn-secondary btn-block" data-action="edit-entry" data-id="' + e.id + '">Modifier</button>' +
         '<button class="btn btn-secondary btn-block" data-action="export-entry-photos" data-id="' + e.id + '">Exporter photos (PDF)</button>' +
+      '</div>' +
+      '<div style="margin-top:10px;">' +
+        '<button class="btn btn-secondary btn-block" data-action="export-entry-fiche" data-id="' + e.id + '">Envoyer cette fiche vers un autre telephone</button>' +
+        '<p class="hint" style="margin-top:6px;">Enregistre un fichier de la fiche complete (donnees + photos) que vous pouvez envoyer par e-mail, message ou AirDrop, puis importer dans l\'app sur l\'autre telephone (bouton &laquo;&nbsp;Importer&nbsp;&raquo; depuis la liste des fiches).</p>' +
       '</div>' +
       '<div style="margin-top:10px;">' +
         '<button class="btn btn-danger btn-block" data-action="delete-entry" data-id="' + e.id + '">Supprimer la fiche</button>' +
@@ -1320,6 +1353,73 @@
     });
   }
 
+  /* ---------- transfert d'une fiche vers un autre telephone ----------
+     Chaque telephone a son propre carnet local (pas de synchronisation),
+     mais l'utilisatrice peut avoir besoin de faire passer une fiche precise
+     sur un autre appareil (e-mail, message, AirDrop...). On exporte la
+     fiche complete (donnees + photos deja compressees) dans un seul fichier
+     .json, et on laisse le choix du moyen d'envoi a l'utilisatrice : si le
+     telephone le permet, on ouvre directement le partage natif (Mail,
+     Messages, WhatsApp, AirDrop, etc. selon ce qui est installe) ; sinon on
+     enregistre simplement le fichier, a joindre ensuite manuellement. */
+  function shareOrSaveFiche(filename, json){
+    var file = null;
+    try{ file = new File([json], filename, {type:'application/json'}); }catch(err){ file = null; }
+    if(file && navigator.share && navigator.canShare && navigator.canShare({files:[file]})){
+      navigator.share({files:[file], title: filename, text: 'Fiche GPS terrain'}).then(function(){
+        toast('Fiche prete a l\'envoi.');
+      }).catch(function(err){
+        if(err && err.name === 'AbortError') return; // partage annule par l'utilisatrice, rien a signaler
+        saveFile(filename, json).then(function(ok){
+          if(ok) toast('Fiche enregistree. Joignez-la a un e-mail, message ou AirDrop.');
+        });
+      });
+    } else {
+      saveFile(filename, json).then(function(ok){
+        if(ok) toast('Fiche enregistree. Joignez-la a un e-mail, message ou AirDrop.');
+      });
+    }
+  }
+  function exportEntryFiche(id){
+    var e = state.entries.find(function(x){ return x.id === id; });
+    if(!e) return;
+    var payload = {app: 'carnet-gps-terrain', version: 1, exportedAt: new Date().toISOString(), entry: e};
+    var json = JSON.stringify(payload);
+    var base = (e.pointName || 'point').replace(/[^a-z0-9_-]+/gi, '_');
+    shareOrSaveFiche('fiche_' + base + '.json', json);
+  }
+  function importEntryFromFile(file){
+    var reader = new FileReader();
+    reader.onload = function(){
+      var payload;
+      try{ payload = JSON.parse(reader.result); }catch(err){ toast('Fichier illisible : ce n\'est pas un fichier de fiche valide.'); return; }
+      var source = (payload && payload.app === 'carnet-gps-terrain' && payload.entry && typeof payload.entry === 'object')
+        ? payload.entry
+        : (payload && typeof payload === 'object' && (payload.pointName !== undefined || payload.photos) ? payload : null);
+      if(!source){ toast('Fichier illisible : ce n\'est pas un fichier de fiche valide.'); return; }
+      var imported;
+      try{ imported = JSON.parse(JSON.stringify(source)); }catch(err){ toast('Fichier illisible : ce n\'est pas un fichier de fiche valide.'); return; }
+      // Nouvel identifiant systematique : evite tout conflit avec une fiche
+      // deja presente sur ce telephone, y compris en cas de reimport de la
+      // meme fiche (ex: envoyee par erreur deux fois).
+      imported.id = uid();
+      imported.importedAt = new Date().toISOString();
+      state.entries.unshift(imported);
+      sortEntries();
+      render();
+      toast('Fiche "' + (imported.pointName || 'sans nom') + '" importee sur cet appareil.');
+      if(dbAvailable){
+        dbPut(imported).catch(function(){
+          dbAvailable = false;
+          state.storageUnavailable = true;
+          render();
+        });
+      }
+    };
+    reader.onerror = function(){ toast('Erreur de lecture du fichier.'); };
+    reader.readAsText(file);
+  }
+
   /* ---------- event delegation ---------- */
   document.addEventListener('click', function(e){
     var el = e.target.closest('[data-action]');
@@ -1341,6 +1441,11 @@
         onConfirm:function(){ deleteEntry(id); }});
     }
     else if(action === 'export-entry-photos') exportEntryPhotos(el.dataset.id);
+    else if(action === 'export-entry-fiche') exportEntryFiche(el.dataset.id);
+    else if(action === 'pick-import-fiche'){
+      var importInput = qs('input[data-role="import-fiche-input"]');
+      if(importInput) importInput.click();
+    }
     else if(action === 'pick-photo'){
       var input = qs('input[data-role="file-input"][data-slot="' + el.dataset.slot + '"]');
       if(input) input.click();
@@ -1389,6 +1494,10 @@
       var slot = el.dataset.slot;
       el.value = '';
       if(file) handleFilePicked(slot, file);
+    } else if(el.matches('input[data-role="import-fiche-input"]')){
+      var ficheFile = el.files && el.files[0];
+      el.value = '';
+      if(ficheFile) importEntryFromFile(ficheFile);
     }
   });
 
