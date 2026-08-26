@@ -343,9 +343,30 @@
     });
   }
   /* ---------- geolocation & images ---------- */
+  // Raison precise d'un echec de geolocalisation, pour pouvoir l'afficher a
+  // l'ecran (au lieu d'un simple "Position indisponible" qui ne permet pas de
+  // savoir si c'est un blocage de permission ou un vrai probleme de signal).
+  function geoErrorReason(err){
+    if(!err) return 'unknown';
+    switch(err.code){
+      case 1: return 'denied';       // PERMISSION_DENIED
+      case 2: return 'unavailable';  // POSITION_UNAVAILABLE
+      case 3: return 'timeout';      // TIMEOUT
+      default: return 'unknown';
+    }
+  }
+  function geoErrorLabel(reason){
+    switch(reason){
+      case 'denied': return 'Autorisation de localisation refusee pour ce site (reglages du navigateur).';
+      case 'unavailable': return 'Signal de localisation introuvable ici (GPS/WiFi/reseau).';
+      case 'timeout': return 'Delai de localisation depasse.';
+      case 'no-geo': return 'Localisation non prise en charge par ce navigateur.';
+      default: return 'Raison inconnue.';
+    }
+  }
   function getLocation(){
     return new Promise(function(resolve){
-      if(!navigator.geolocation){ resolve(null); return; }
+      if(!navigator.geolocation){ resolve({coords:null, errorReason:'no-geo'}); return; }
       var settled = false;
       function toResult(pos){
         return {lat:pos.coords.latitude, lon:pos.coords.longitude, acc:pos.coords.accuracy, alt:pos.coords.altitude};
@@ -355,12 +376,12 @@
           function(pos){
             if(settled) return;
             settled = true;
-            resolve(toResult(pos));
+            resolve({coords: toResult(pos), errorReason: null});
           },
-          function(){
+          function(err){
             if(settled) return;
             settled = true;
-            resolve(null);
+            resolve({coords: null, errorReason: geoErrorReason(err)});
           },
           {enableHighAccuracy:false, timeout:15000, maximumAge:60000}
         );
@@ -369,7 +390,7 @@
         function(pos){
           if(settled) return;
           settled = true;
-          resolve(toResult(pos));
+          resolve({coords: toResult(pos), errorReason: null});
         },
         function(){
           // La haute precision (GPS pur) peut echouer ou expirer en interieur ;
@@ -755,7 +776,11 @@
     } else if(state.busySlots[slot]){
       metaLine = '<div class="photo-meta"><span>&#128205; Localisation en cours&hellip;</span></div>';
     } else {
-      metaLine = '<div class="photo-meta"><span>&#128205; ' + fmtCoords(meta.coords) + '</span>' +
+      var coordsText = fmtCoords(meta.coords);
+      if(!meta.coords && meta.locationError){
+        coordsText += ' &mdash; ' + escapeHtml(geoErrorLabel(meta.locationError));
+      }
+      metaLine = '<div class="photo-meta"><span>&#128205; ' + coordsText + '</span>' +
         '<button type="button" data-action="retry-location" data-slot="' + slot + '">Relocaliser</button></div>';
     }
     var toolbar = '';
@@ -982,7 +1007,10 @@
       render();
       return getLocation();
     }).then(function(loc){
-      if(state.photoMeta[slot]) state.photoMeta[slot].coords = loc;
+      if(state.photoMeta[slot]){
+        state.photoMeta[slot].coords = loc.coords;
+        state.photoMeta[slot].locationError = loc.errorReason;
+      }
       state.busySlots[slot] = false;
       render();
     }).catch(function(err){
@@ -1000,7 +1028,8 @@
     state.busySlots[slot] = true;
     render();
     getLocation().then(function(loc){
-      state.photoMeta[slot].coords = loc;
+      state.photoMeta[slot].coords = loc.coords;
+      state.photoMeta[slot].locationError = loc.errorReason;
       state.busySlots[slot] = false;
       render();
     });
