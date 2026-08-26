@@ -413,10 +413,24 @@
   // cours...". Ce filet force une reponse au bout de 25 s dans tous les cas.
   var LOCATION_WATCHDOG_MS = 25000;
   function getLocation(){
+    var startedAt = Date.now();
     var watchdog = new Promise(function(resolve){
-      setTimeout(function(){ resolve({coords:null, errorReason:'timeout'}); }, LOCATION_WATCHDOG_MS);
+      setTimeout(function(){ resolve({coords:null, errorReason:'timeout', source:'watchdog'}); }, LOCATION_WATCHDOG_MS);
     });
-    return Promise.race([getLocationNative(), watchdog]);
+    var native = getLocationNative().then(function(res){
+      res.source = 'native';
+      return res;
+    });
+    return Promise.race([native, watchdog]).then(function(res){
+      // Combien de temps la reponse (succes ou echec) a-t-elle mis a
+      // arriver, et est-elle venue de l'API native ou du filet de securite ?
+      // Utile pour distinguer un vrai TIMEOUT natif (le telephone a
+      // essaye et n'a pas reussi a obtenir de position, meme en basse
+      // precision) d'un blocage total ou aucun callback ne se declenche
+      // jamais (dans ce cas seul le filet de securite repond, a ~25 s pile).
+      res.elapsedMs = Date.now() - startedAt;
+      return res;
+    });
   }
   function loadImageSource(file){
     if(window.createImageBitmap){
@@ -796,6 +810,15 @@
       var coordsText = fmtCoords(meta.coords);
       if(!meta.coords && meta.locationError){
         coordsText += ' &mdash; ' + escapeHtml(geoErrorLabel(meta.locationError));
+        // Detail technique affiche entre parentheses pour le diagnostic en
+        // cours : le temps ecoule et si la reponse vient de l'API native du
+        // telephone ou du filet de securite de l'app (voir v16/v17). Utile
+        // a l'utilisatrice pour nous le rapporter tel quel.
+        if(meta.locationDebug && typeof meta.locationDebug.elapsedMs === 'number'){
+          var secs = Math.round(meta.locationDebug.elapsedMs / 1000);
+          var srcLabel = meta.locationDebug.source === 'watchdog' ? 'app, aucune reponse du telephone' : 'telephone';
+          coordsText += ' (' + secs + ' s, reponse : ' + srcLabel + ')';
+        }
       }
       metaLine = '<div class="photo-meta"><span>&#128205; ' + coordsText + '</span>' +
         '<button type="button" data-action="retry-location" data-slot="' + slot + '">Relocaliser</button></div>';
@@ -1034,6 +1057,7 @@
       if(state.photoMeta[slot]){
         state.photoMeta[slot].coords = loc.coords;
         state.photoMeta[slot].locationError = loc.errorReason;
+        state.photoMeta[slot].locationDebug = {elapsedMs: loc.elapsedMs, source: loc.source};
       }
       state.busySlots[slot] = false;
       delete state.locationPromises[slot];
@@ -1058,6 +1082,7 @@
     locPromise.then(function(loc){
       state.photoMeta[slot].coords = loc.coords;
       state.photoMeta[slot].locationError = loc.errorReason;
+      state.photoMeta[slot].locationDebug = {elapsedMs: loc.elapsedMs, source: loc.source};
       state.busySlots[slot] = false;
       delete state.locationPromises[slot];
       render();
