@@ -364,7 +364,7 @@
       default: return 'Raison inconnue.';
     }
   }
-  function getLocation(){
+  function getLocationNative(){
     return new Promise(function(resolve){
       if(!navigator.geolocation){ resolve({coords:null, errorReason:'no-geo'}); return; }
       var settled = false;
@@ -402,6 +402,21 @@
         {enableHighAccuracy:true, timeout:8000, maximumAge:0}
       );
     });
+  }
+  // Filet de securite : sur certains telephones (constate en usage reel), les
+  // callbacks natifs (succes ET erreur) de getCurrentPosition peuvent ne
+  // jamais se declencher du tout - notamment quand la prise de photo via
+  // l'appareil photo systeme met la page en arriere-plan pendant la demande
+  // de localisation. Dans ce cas, les delais internes de getLocationNative()
+  // (8 s + 15 s = 23 s max en theorie) ne suffisent pas a garantir une
+  // reponse : l'app restait bloquee indefiniment sur "Localisation en
+  // cours...". Ce filet force une reponse au bout de 25 s dans tous les cas.
+  var LOCATION_WATCHDOG_MS = 25000;
+  function getLocation(){
+    var watchdog = new Promise(function(resolve){
+      setTimeout(function(){ resolve({coords:null, errorReason:'timeout'}); }, LOCATION_WATCHDOG_MS);
+    });
+    return Promise.race([getLocationNative(), watchdog]);
   }
   function loadImageSource(file){
     if(window.createImageBitmap){
@@ -654,6 +669,7 @@
     bubbleValue: null,
     cadence10sOk: false,
     busySlots: {},
+    locationPromises: {},
     storageUnavailable: false
   };
 
@@ -676,6 +692,7 @@
     state.photoMeta = {close:null, env1:null, env2:null};
     state.bubbleValue = null;
     state.cadence10sOk = false;
+    state.locationPromises = {};
   }
 
   /* ---------- init ---------- */
@@ -1005,16 +1022,25 @@
       state.photoMeta[slot] = {dataUrl: dataUrl, coords: null, takenAt: new Date().toISOString()};
       delete state.annotators[slot];
       render();
-      return getLocation();
+      // On garde une reference a cette recherche de position en cours : si
+      // l'utilisatrice enregistre la fiche avant qu'elle ne se termine,
+      // performSave() attendra ce resultat (borne par le filet de securite
+      // de getLocation(), 25 s max) plutot que de sauvegarder "null"
+      // prematurement alors qu'une position etait sur le point d'arriver.
+      var locPromise = getLocation();
+      state.locationPromises[slot] = locPromise;
+      return locPromise;
     }).then(function(loc){
       if(state.photoMeta[slot]){
         state.photoMeta[slot].coords = loc.coords;
         state.photoMeta[slot].locationError = loc.errorReason;
       }
       state.busySlots[slot] = false;
+      delete state.locationPromises[slot];
       render();
     }).catch(function(err){
       state.busySlots[slot] = false;
+      delete state.locationPromises[slot];
       if(err && err.code === 'portrait'){
         toast('Photo refusee : elle doit etre prise en format paysage (telephone a l\'horizontale). Reessayez.');
       } else {
@@ -1027,10 +1053,13 @@
     if(!state.photoMeta[slot]) return;
     state.busySlots[slot] = true;
     render();
-    getLocation().then(function(loc){
+    var locPromise = getLocation();
+    state.locationPromises[slot] = locPromise;
+    locPromise.then(function(loc){
       state.photoMeta[slot].coords = loc.coords;
       state.photoMeta[slot].locationError = loc.errorReason;
       state.busySlots[slot] = false;
+      delete state.locationPromises[slot];
       render();
     });
   }
@@ -1105,7 +1134,17 @@
       var a = state.annotators[slot];
       if(a && a.ready) readyPromises.push(a.ready);
     });
-    Promise.all(readyPromises).then(function(){ finishSave(incomplete); });
+    // De meme, si une recherche de position est encore en cours pour une
+    // photo (voir handleFilePicked/retryLocation), on l'attend aussi avant
+    // de finaliser : sinon un enregistrement rapide capturerait "Position
+    // indisponible" alors qu'une position etait sur le point d'arriver.
+    // getLocation() garantit desormais une reponse sous 25 s au maximum
+    // (filet de securite), donc cette attente reste toujours bornee.
+    var pendingLocations = Object.keys(state.locationPromises).map(function(slot){
+      return state.locationPromises[slot];
+    });
+    if(pendingLocations.length) toast('Enregistrement en attente de la position...');
+    Promise.all(readyPromises.concat(pendingLocations)).then(function(){ finishSave(incomplete); });
   }
 
   function finishSave(incomplete){
