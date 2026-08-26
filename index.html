@@ -370,6 +370,42 @@
       img.src = url;
     });
   }
+  // Cahier des charges : chaque photo livree doit peser moins de 1 Mo (un
+  // controle qualite reel a releve des photos superieures a 1 Mo). On garde
+  // une marge de securite et on vise 950 Ko, pas exactement 1 048 576.
+  var MAX_PHOTO_BYTES = 950 * 1024;
+  function dataUrlByteSize(dataUrl){
+    var i = dataUrl.indexOf(',');
+    var b64 = i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
+    return Math.floor(b64.length * 3 / 4);
+  }
+  // Encodes a canvas as JPEG, reducing quality and then (if quality alone
+  // isn't enough) the pixel dimensions, until the result is under maxBytes.
+  // Used both for the initial photo import and for the annotated/flattened
+  // version, so no photo the app produces can end up over the limit.
+  function encodeJpegUnderSize(sourceCanvas, maxBytes){
+    var work = sourceCanvas;
+    var quality = 0.85;
+    var dataUrl = work.toDataURL('image/jpeg', quality);
+    var guard = 0;
+    while(dataUrlByteSize(dataUrl) > maxBytes && guard < 10){
+      guard++;
+      if(quality > 0.4){
+        quality = Math.round((quality - 0.1) * 100) / 100;
+      } else {
+        var nw = Math.max(300, Math.round(work.width * 0.85));
+        var nh = Math.max(200, Math.round(work.height * 0.85));
+        if(nw === work.width && nh === work.height) break; // deja au plus petit
+        var next = document.createElement('canvas');
+        next.width = nw; next.height = nh;
+        next.getContext('2d').drawImage(work, 0, 0, nw, nh);
+        work = next;
+        quality = 0.7;
+      }
+      dataUrl = work.toDataURL('image/jpeg', quality);
+    }
+    return dataUrl;
+  }
   function fileToDataURL(file, maxDim){
     return loadImageSource(file).then(function(src){
       var w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
@@ -384,7 +420,7 @@
       canvas.width = cw; canvas.height = ch;
       var ctx = canvas.getContext('2d');
       ctx.drawImage(src, 0, 0, cw, ch);
-      return canvas.toDataURL('image/jpeg', 0.85);
+      return encodeJpegUnderSize(canvas, MAX_PHOTO_BYTES);
     });
   }
   function dataURLtoBlob(dataUrl){
@@ -451,6 +487,7 @@
     this.onNeedLabel = onNeedLabel || function(){};
     this.tool = null;
     this.pending = null;
+    this.loaded = false;
     var self = this;
     this.img = new Image();
     this.ready = new Promise(function(resolve){
@@ -460,6 +497,7 @@
         canvas.width = Math.max(1, Math.round(self.img.naturalWidth * scale));
         canvas.height = Math.max(1, Math.round(self.img.naturalHeight * scale));
         self.redraw();
+        self.loaded = true;
         resolve();
       };
     });
@@ -566,6 +604,7 @@
     annotators: {},
     photoMeta: {close:null, env1:null, env2:null},
     bubbleValue: null,
+    cadence10sOk: false,
     busySlots: {},
     storageUnavailable: false
   };
@@ -588,6 +627,7 @@
     state.annotators = {};
     state.photoMeta = {close:null, env1:null, env2:null};
     state.bubbleValue = null;
+    state.cadence10sOk = false;
   }
 
   /* ---------- init ---------- */
@@ -744,6 +784,10 @@
           '<div class="field"><label for="f-serial">Nom / n&deg; serie appareil</label>' +
             '<input type="text" id="f-serial" placeholder="Ex. Trimble R12-04582" value="' + escapeHtml(d.device.serial) + '"></div>' +
         '</div>' +
+        '<div class="field"><label>Cadence d\'enregistrement GNSS</label>' +
+          '<div class="segmented">' +
+            '<div class="seg-btn' + (state.cadence10sOk?' active-good':'') + '" data-action="toggle-cadence10s">&#10003; Reglee sur 10 secondes</div>' +
+          '</div></div>' +
         '<div class="field-row">' +
           '<div class="field"><label for="f-start">Heure de debut</label><input type="time" id="f-start" value="' + escapeHtml(d.device.timeStart) + '"></div>' +
           '<div class="field"><label for="f-end">Heure de fin</label><input type="time" id="f-end" value="' + escapeHtml(d.device.timeEnd) + '"></div>' +
@@ -846,6 +890,7 @@
         '<div class="section-title">Instrument GPS</div>' +
         '<div class="kv"><span class="k">Hauteur d\'appareil</span><span class="v">' + (dev.height ? escapeHtml(dev.height) + ' m' : '&mdash;') + '</span></div>' +
         '<div class="kv"><span class="k">Nom / n&deg; serie</span><span class="v">' + (dev.serial ? escapeHtml(dev.serial) : '&mdash;') + '</span></div>' +
+        '<div class="kv"><span class="k">Cadence GNSS 10s</span><span class="v">' + (dev.cadence10s ? '&#10003; Confirmee' : '&#9888; Non confirmee') + '</span></div>' +
         '<div class="kv"><span class="k">Heure debut</span><span class="v">' + (dev.timeStart || '&mdash;') + '</span></div>' +
         '<div class="kv"><span class="k">Heure fin</span><span class="v">' + (dev.timeEnd || '&mdash;') + '</span></div>' +
         '<div class="kv"><span class="k">Controle bulle</span><span class="v">' + bubbleChip + '</span></div>' +
@@ -879,6 +924,7 @@
     draft.remarks = e.remarks || '';
     draft.device = Object.assign({height:'',serial:'',timeStart:'',timeEnd:'',bubbleNote:''}, e.device||{});
     state.bubbleValue = (e.device && e.device.bubble) || null;
+    state.cadence10sOk = !!(e.device && e.device.cadence10s);
     ['close','env1','env2'].forEach(function(slot){
       if(e.photos && e.photos[slot]){
         var src = e.photos[slot];
@@ -948,6 +994,7 @@
     if(!draft.device.serial) missing.push('Nom / n° serie appareil');
     if(!draft.device.timeStart) missing.push('Heure de debut');
     if(!draft.device.timeEnd) missing.push('Heure de fin');
+    if(!state.cadence10sOk) missing.push('Cadence d\'enregistrement GNSS (10 secondes)');
     if(!state.bubbleValue) missing.push('Controle de la bulle');
     // Object markers are optional and unlimited. Measures are unlimited but
     // at least 2 are required per environment photo once that photo exists.
@@ -985,6 +1032,21 @@
   }
 
   function performSave(incomplete){
+    // Each environment photo's canvas image decodes asynchronously (see
+    // PhotoAnnotator.ready). If the user hits "Enregistrer" right after
+    // opening a fiche for editing — before that decode finishes — the
+    // canvas would still be blank at that instant. Wait for every photo
+    // to finish loading before actually building and saving the entry,
+    // so a fast save can never capture a blank canvas as the photo.
+    var readyPromises = [];
+    ['env1','env2'].forEach(function(slot){
+      var a = state.annotators[slot];
+      if(a && a.ready) readyPromises.push(a.ready);
+    });
+    Promise.all(readyPromises).then(function(){ finishSave(incomplete); });
+  }
+
+  function finishSave(incomplete){
     var id = state.editingId || uid();
     var createdAt = state.editingId
       ? (state.entries.find(function(x){ return x.id === id; }) || {}).createdAt || new Date().toISOString()
@@ -998,7 +1060,14 @@
         photos.close = {dataUrl: meta.dataUrl, coords: meta.coords, takenAt: meta.takenAt};
       } else {
         var annotator = state.annotators[slot];
-        var flattened = (annotator && annotator.canvas && annotator.canvas.width) ? annotator.canvas.toDataURL('image/jpeg', 0.88) : meta.dataUrl;
+        // IMPORTANT: a canvas has a non-zero width (300 by default) even
+        // before its image has finished loading, so checking canvas.width
+        // alone is not enough — it can pass while the canvas is still
+        // blank, which previously could save an all-white "photo" if the
+        // user hit Enregistrer before the image decode finished (most
+        // likely right after opening a fiche for editing). Only flatten
+        // once the annotator has actually finished drawing the image.
+        var flattened = (annotator && annotator.loaded && annotator.canvas && annotator.canvas.width) ? encodeJpegUnderSize(annotator.canvas, MAX_PHOTO_BYTES) : meta.dataUrl;
         photos[slot] = {
           raw: meta.dataUrl,
           dataUrl: flattened,
@@ -1015,6 +1084,7 @@
       device: {
         height: draft.device.height, serial: draft.device.serial,
         timeStart: draft.device.timeStart, timeEnd: draft.device.timeEnd,
+        cadence10s: state.cadence10sOk,
         bubble: state.bubbleValue, bubbleNote: draft.device.bubbleNote
       },
       photos: photos
@@ -1052,7 +1122,7 @@
     return s;
   }
   function exportCSV(){
-    var headers = ['Nom du point','Nature du point','Numero de dossier','Fiche complete','Date creation','Hauteur appareil (m)','Nom / N serie appareil','Heure debut','Heure fin',
+    var headers = ['Nom du point','Nature du point','Numero de dossier','Fiche complete','Date creation','Hauteur appareil (m)','Nom / N serie appareil','Cadence GNSS 10s','Heure debut','Heure fin',
       'Controle bulle','Note bulle','Remarques',
       'Lat photo pres','Lon photo pres','Precision (m) photo pres',
       'Lat photo env1','Lon photo env1','Mesures env1 (m)','Objets env1',
@@ -1066,7 +1136,7 @@
       var e1a = normalizeAnnotations(e1.annotations);
       var e2a = normalizeAnnotations(e2.annotations);
       return [
-        e.pointName, e.natureDuPoint, e.numeroDossier, e.incomplete ? 'Non' : 'Oui', fmtDateTime(e.createdAt), d.height, d.serial, d.timeStart, d.timeEnd,
+        e.pointName, e.natureDuPoint, e.numeroDossier, e.incomplete ? 'Non' : 'Oui', fmtDateTime(e.createdAt), d.height, d.serial, d.cadence10s ? 'Oui' : 'Non', d.timeStart, d.timeEnd,
         d.bubble === 'ok' ? 'Centree' : (d.bubble === 'ko' ? 'Decalee' : ''), d.bubbleNote, e.remarks,
         pc ? pc.lat.toFixed(6) : '', pc ? pc.lon.toFixed(6) : '', pc ? Math.round(pc.acc) : '',
         e1c ? e1c.lat.toFixed(6) : '', e1c ? e1c.lon.toFixed(6) : '',
@@ -1278,6 +1348,10 @@
     else if(action === 'retry-location') retryLocation(el.dataset.slot);
     else if(action === 'toggle-bubble'){
       state.bubbleValue = state.bubbleValue === el.dataset.value ? null : el.dataset.value;
+      render();
+    }
+    else if(action === 'toggle-cadence10s'){
+      state.cadence10sOk = !state.cadence10sOk;
       render();
     }
     else if(action === 'set-tool'){
