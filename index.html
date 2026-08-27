@@ -522,7 +522,10 @@
      a l'utilisatrice de charger elle-meme une capture d'ecran (ex: prise
      dans l'app Plans). */
   var MAP_TILE_SIZE = 256;
-  var MAP_TILE_ZOOM = 19;
+  // Zoom 19 (v18) montrait une zone trop restreinte pour se reperer sur le
+  // terrain (retour utilisatrice) ; 17 montre une zone environ 4x plus large
+  // (quelques centaines de metres) tout en gardant le repere bien identifiable.
+  var MAP_TILE_ZOOM = 17;
   var MAP_CANVAS_W = 480;
   var MAP_CANVAS_H = 320;
   var MAP_WATCHDOG_MS = 12000;
