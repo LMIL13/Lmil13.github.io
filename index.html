@@ -1,4 +1,18 @@
+<!DOCTYPE html>
 <title>Carnet GPS Terrain</title>
+<meta charset="utf-8">
+<!-- App pensee pour un usage telephone/tablette uniquement (jamais desktop).
+     viewport-fit=cover + les paddings env(safe-area-inset-*) plus bas dans le
+     CSS evitent que la barre du bas ou le contenu passent sous l'encoche/la
+     barre d'accueil des telephones a bords arrondis. maximum-scale=1 evite le
+     zoom involontaire iOS au focus d'un champ de saisie (en plus du passage
+     des champs a 16px de police, meme raison). -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EEEADC" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171B15" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -26,25 +40,32 @@
     --shadow:0 1px 2px rgba(0,0,0,0.3), 0 6px 18px rgba(0,0,0,0.35);
   }
 
-  *{box-sizing:border-box;}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   html,body{margin:0;padding:0;}
-  body{background:var(--bg);color:var(--ink);font-family:var(--font-sans);-webkit-tap-highlight-color:transparent;}
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}
+  body{background:var(--bg);color:var(--ink);font-family:var(--font-sans);-webkit-tap-highlight-color:transparent;
+    overscroll-behavior-y:none;}
   ::selection{background:color-mix(in srgb, var(--accent) 30%, transparent);}
   h1,h2,h3{text-wrap:balance;margin:0;}
-  button{font-family:inherit;}
+  button{font-family:inherit;touch-action:manipulation;}
   input,select,textarea{font-family:inherit;color:inherit;}
+  a{touch-action:manipulation;}
 
-  #app{max-width:560px;margin:0 auto;min-height:100vh;background:var(--bg);display:flex;flex-direction:column;}
+  /* App pensee pour telephone jusqu'a tablette (jamais desktop) : 720px
+     laisse une tablette utiliser sa largeur au lieu de rester coincee dans
+     une colonne etroite de type telephone, tout en restant une largeur de
+     lecture confortable (le contenu ne s'etire jamais en pleine largeur). */
+  #app{max-width:720px;margin:0 auto;min-height:100vh;min-height:100dvh;background:var(--bg);display:flex;flex-direction:column;}
 
   .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;
-    padding:14px 16px;background:color-mix(in srgb, var(--bg) 88%, transparent);backdrop-filter:blur(8px);
-    border-bottom:1px solid var(--line);}
+    padding:calc(14px + env(safe-area-inset-top)) 16px 14px;background:color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line);}
   .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:17px;letter-spacing:-0.01em;}
   .brand-pin{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;
     background:var(--accent);color:var(--accent-ink);font-size:14px;flex:none;}
   .topbar-actions{display:flex;gap:8px;align-items:center;}
 
-  main{padding:16px;padding-bottom:96px;flex:1;}
+  main{padding:16px;padding-bottom:calc(96px + env(safe-area-inset-bottom));flex:1;}
 
   .btn{appearance:none;border:1px solid transparent;border-radius:10px;padding:10px 14px;font-size:14px;font-weight:600;
     cursor:pointer;display:inline-flex;align-items:center;gap:6px;line-height:1.2;transition:transform .08s ease, opacity .15s ease;}
@@ -90,7 +111,10 @@
   .field:last-child{margin-bottom:0;}
   .field label{font-size:11.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-dim);}
   .field input[type="text"],.field input[type="number"],.field input[type="time"],.field textarea{
-    background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;color:var(--ink);}
+    /* 16px (pas 15) : sous ce seuil, Safari iOS zoome automatiquement la
+       page au focus d'un champ de saisie, ce qui derangeait la saisie sur
+       telephone. */
+    background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:16px;color:var(--ink);}
   .field input:focus,.field textarea:focus{outline:2px solid color-mix(in srgb, var(--accent) 55%, transparent);outline-offset:1px;}
   .field textarea{resize:vertical;min-height:60px;font-family:var(--font-sans);}
   .field-row{display:flex;gap:10px;}
@@ -113,6 +137,8 @@
   .photo-preview img,.photo-preview canvas{width:100%;display:block;touch-action:none;background:#111;}
   .photo-retake{position:absolute;top:8px;right:8px;background:rgba(23,27,21,0.72);color:#fff;border:none;border-radius:8px;
     padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;backdrop-filter:blur(3px);}
+  .photo-expand{position:absolute;top:8px;left:8px;background:rgba(23,27,21,0.72);color:#fff;border:none;border-radius:8px;
+    padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;backdrop-filter:blur(3px);}
   .photo-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;font-family:var(--font-mono);
     font-size:12px;color:var(--teal);background:var(--surface);}
   .photo-meta.is-empty{color:var(--ink-dim);}
@@ -132,7 +158,7 @@
   .anno-row button{background:none;border:none;color:var(--danger);font-size:11px;cursor:pointer;font-weight:600;}
 
   .formbar{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;background:transparent;pointer-events:none;z-index:30;}
-  .formbar-inner{pointer-events:auto;max-width:560px;width:100%;display:flex;gap:10px;padding:12px 16px;
+  .formbar-inner{pointer-events:auto;max-width:720px;width:100%;display:flex;gap:10px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));
     background:color-mix(in srgb, var(--bg) 92%, transparent);backdrop-filter:blur(10px);border-top:1px solid var(--line);}
 
   .detail-photo{border-radius:12px;overflow:hidden;border:1px solid var(--line);}
@@ -160,8 +186,8 @@
     font-size:16px;color:var(--ink);margin-bottom:14px;}
   .modal-actions{display:flex;gap:10px;justify-content:flex-end;}
 
-  #toast-root{position:fixed;left:0;right:0;bottom:18px;display:flex;flex-direction:column;align-items:center;gap:8px;
-    z-index:200;pointer-events:none;padding:0 16px;}
+  #toast-root{position:fixed;left:0;right:0;bottom:calc(18px + env(safe-area-inset-bottom));display:flex;flex-direction:column;
+    align-items:center;gap:8px;z-index:200;pointer-events:none;padding:0 16px;}
   .toast{background:var(--ink);color:var(--bg);font-size:13px;font-weight:500;padding:10px 16px;border-radius:10px;
     box-shadow:var(--shadow);max-width:420px;text-align:center;}
 
@@ -172,6 +198,30 @@
     background:color-mix(in srgb, var(--warn) 14%, var(--surface));border:1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
     color:var(--warn);border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:500;}
   .sync-banner-danger{background:color-mix(in srgb, var(--danger) 14%, var(--surface));border-color:color-mix(in srgb, var(--danger) 40%, var(--line));color:var(--danger);}
+
+  /* Vue plein ecran pour renseigner les cotations sur une photo
+     d'environnement (meilleur visuel demande par l'utilisatrice) : la photo
+     occupe tout l'ecran, la barre du bas garde les memes boutons +Mesure /
+     +Objet et la liste, un bouton "Fermer" bien visible en haut permet de
+     revenir en arriere a tout moment (notamment en cas d'erreur). */
+  #fullscreen-root:empty{display:none;}
+  /* z-index 90 : sous la modale (100) pour que la fenetre de saisie d'une
+     distance/d'un libelle d'objet reste bien visible et utilisable par-
+     dessus la vue plein ecran ; au-dessus de la barre du bas du formulaire
+     (formbar, 30) pour bien la masquer. */
+  .annotator-fullscreen{position:fixed;inset:0;z-index:90;background:#0B0D0A;display:flex;flex-direction:column;}
+  .af-header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:none;
+    padding:calc(10px + env(safe-area-inset-top)) 14px 10px calc(14px + env(safe-area-inset-left));
+    background:rgba(0,0,0,0.82);color:#fff;}
+  .af-header h3{font-size:14px;font-weight:600;color:#fff;}
+  .af-close{background:rgba(255,255,255,0.14);color:#fff;border:none;border-radius:10px;padding:9px 16px;
+    font-size:14px;font-weight:700;cursor:pointer;flex:none;}
+  .af-canvas-wrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;
+    background:#0B0D0A;padding:10px;}
+  .af-canvas-wrap canvas{max-width:100%;max-height:100%;width:auto;height:auto;touch-action:none;display:block;
+    border-radius:4px;}
+  .af-footer{flex:none;background:var(--surface);border-top:1px solid var(--line);
+    padding-bottom:env(safe-area-inset-bottom);max-height:42vh;overflow-y:auto;}
 </style>
 
 <div id="app">
@@ -183,6 +233,7 @@
 </div>
 <div id="modal-root"></div>
 <div id="toast-root"></div>
+<div id="fullscreen-root"></div>
 
 <script>
 (function(){
@@ -750,7 +801,7 @@
   }
 
   /* ---------- photo annotator ---------- */
-  function PhotoAnnotator(canvas, rawDataUrl, initialAnnotations, onNeedLabel){
+  function PhotoAnnotator(canvas, rawDataUrl, initialAnnotations, onNeedLabel, maxWidth){
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.raw = rawDataUrl;
@@ -763,7 +814,11 @@
     this.img = new Image();
     this.ready = new Promise(function(resolve){
       self.img.onload = function(){
-        var maxW = 900;
+        // La vue plein ecran (v23) passe une resolution plus elevee (les
+        // photos sources sont deja plafonnees a 1100px, voir fileToDataURL)
+        // pour un rendu plus net sur un grand ecran de tablette ; la vue
+        // normale garde 900 comme avant.
+        var maxW = maxWidth || 900;
         var scale = Math.min(1, maxW / self.img.naturalWidth);
         canvas.width = Math.max(1, Math.round(self.img.naturalWidth * scale));
         canvas.height = Math.max(1, Math.round(self.img.naturalHeight * scale));
@@ -880,7 +935,11 @@
     cadence10sOk: false,
     busySlots: {},
     locationPromises: {},
-    storageUnavailable: false
+    storageUnavailable: false,
+    // Slot ('env1'/'env2') dont la photo est actuellement affichee en plein
+    // ecran pour renseigner les cotations, ou null si aucune vue plein ecran
+    // n'est ouverte.
+    fullscreenSlot: null
   };
 
   function sortEntries(){
@@ -905,6 +964,7 @@
     state.bubbleValue = null;
     state.cadence10sOk = false;
     state.locationPromises = {};
+    state.fullscreenSlot = null;
   }
 
   /* ---------- init ---------- */
@@ -946,6 +1006,15 @@
     } else if(state.view === 'detail'){
       actions.innerHTML = '<button class="btn btn-ghost btn-sm" data-action="back-to-list">&larr; Fiches</button>';
       root.innerHTML = storageBannerHtml() + renderDetail(state.entries.find(function(e){ return e.id === state.editingId; }));
+    }
+    // La vue plein ecran (cotations) n'existe que depuis le formulaire ; en
+    // dehors de cette vue on la ferme silencieusement plutot que de risquer
+    // de l'afficher au-dessus d'un ecran auquel elle ne correspond plus.
+    if(state.view !== 'form') state.fullscreenSlot = null;
+    var fsRoot = qs('#fullscreen-root');
+    if(fsRoot){
+      fsRoot.innerHTML = renderFullscreenAnnotator();
+      mountFullscreenCanvas();
     }
   }
 
@@ -997,6 +1066,7 @@
         '<span class="photo-hint">' + hint + '</span></div>';
     } else if(allowAnnotate){
       body = '<div class="photo-preview"><canvas data-slot="' + slot + '"></canvas>' +
+        '<button type="button" class="photo-expand" data-action="open-annotator-fullscreen" data-slot="' + slot + '">&#9974; Plein ecran</button>' +
         '<button type="button" class="photo-retake" data-action="pick-photo" data-slot="' + slot + '">Reprendre</button></div>';
     } else {
       body = '<div class="photo-preview"><img src="' + meta.dataUrl + '" alt="">' +
@@ -1145,6 +1215,53 @@
       var annotator = new PhotoAnnotator(canvas, meta.dataUrl, initialAnn, function(need){ onAnnotatorNeedLabel(slot, need); });
       state.annotators[slot] = annotator;
     });
+  }
+
+  // Titre affiche en haut de la vue plein ecran, garde en phase avec les
+  // titres utilises dans le formulaire (photoBlockHtml).
+  var SLOT_TITLES = {env1:'Photo environnement 1', env2:'Photo environnement 2'};
+
+  // Vue plein ecran pour renseigner les cotations (mesures/objets) sur une
+  // photo d'environnement avec un meilleur visuel, demandee par
+  // l'utilisatrice apres usage sur le terrain. Reutilise le meme toolbar et
+  // la meme liste que dans le formulaire (anno-toolbar/anno-summary, memes
+  // data-action) : les clics y sont deja geres par la delegation d'evenements
+  // existante, aucune logique nouvelle a dupliquer pour +Mesure/+Objet/effacer.
+  function renderFullscreenAnnotator(){
+    var slot = state.fullscreenSlot;
+    if(!slot) return '';
+    var meta = state.photoMeta[slot];
+    if(!meta || !meta.dataUrl){ state.fullscreenSlot = null; return ''; }
+    var ann = normalizeAnnotations(state.annotators[slot] && state.annotators[slot].annotations);
+    var nextColor = PhotoAnnotator.COLORS[ann.measures.length % PhotoAnnotator.COLORS.length];
+    return '<div class="annotator-fullscreen">' +
+      '<div class="af-header"><h3>' + escapeHtml(SLOT_TITLES[slot] || 'Photo') + '</h3>' +
+        '<button type="button" class="af-close" data-action="close-annotator-fullscreen">&#10005; Fermer</button></div>' +
+      '<div class="af-canvas-wrap"><canvas data-slot="' + slot + '"></canvas></div>' +
+      '<div class="af-footer">' +
+        '<div class="anno-toolbar">' +
+          '<button type="button" class="anno-btn" data-action="set-tool" data-slot="' + slot + '" data-tool="measure"><span class="dot" style="background:' + nextColor + '"></span>+ Mesure</button>' +
+          '<button type="button" class="anno-btn" data-action="set-tool" data-slot="' + slot + '" data-tool="object"><span class="dot" style="background:#232B23"></span>+ Objet</button>' +
+        '</div>' +
+        '<div class="anno-summary">' + annoListHtml(slot, ann) + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  function mountFullscreenCanvas(){
+    var slot = state.fullscreenSlot;
+    if(!slot) return;
+    var meta = state.photoMeta[slot];
+    if(!meta || !meta.dataUrl) return;
+    var fsRoot = qs('#fullscreen-root');
+    var canvas = fsRoot && qs('canvas[data-slot="' + slot + '"]', fsRoot);
+    if(!canvas) return;
+    var existing = state.annotators[slot];
+    var initialAnn = normalizeAnnotations(existing ? existing.annotations : null);
+    // maxWidth 1200 : les photos sources sont deja plafonnees a 1100px
+    // (fileToDataURL), donc ceci utilise en pratique toute la resolution
+    // disponible au lieu du plafond de 900 utilise pour la vignette normale.
+    var annotator = new PhotoAnnotator(canvas, meta.dataUrl, initialAnn, function(need){ onAnnotatorNeedLabel(slot, need); }, 1200);
+    state.annotators[slot] = annotator;
   }
 
   function onAnnotatorNeedLabel(slot, need){
@@ -1877,6 +1994,14 @@
       if(!annotator2 || isNaN(idx)) return;
       if(kind === 'object') annotator2.clearObject(idx);
       else annotator2.clearMeasure(idx);
+      render();
+    }
+    else if(action === 'open-annotator-fullscreen'){
+      state.fullscreenSlot = el.dataset.slot;
+      render();
+    }
+    else if(action === 'close-annotator-fullscreen'){
+      state.fullscreenSlot = null;
       render();
     }
     else if(action === 'copy-coords'){
