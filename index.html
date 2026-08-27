@@ -511,6 +511,165 @@
     return new Blob([arr], {type:mime});
   }
 
+  /* ---------- carte satellite du point (v18) ----------
+     A la demande de l'utilisatrice, les coordonnees brutes affichees sous
+     chaque photo sont remplacees par une seule carte satellite pour toute la
+     fiche, generee a partir de la position de la "photo de pres". On
+     compose l'image nous-memes (tuiles + epingle) via un canvas, a partir
+     des tuiles satellite publiques Esri World Imagery (pas de cle API,
+     utilisable directement depuis le navigateur). Si le reseau est absent ou
+     les tuiles inaccessibles, on affiche "Carte indisponible" et on propose
+     a l'utilisatrice de charger elle-meme une capture d'ecran (ex: prise
+     dans l'app Plans). */
+  var MAP_TILE_SIZE = 256;
+  var MAP_TILE_ZOOM = 19;
+  var MAP_CANVAS_W = 480;
+  var MAP_CANVAS_H = 320;
+  var MAP_WATCHDOG_MS = 12000;
+  function lonLatToWorldPx(lat, lon, zoom){
+    var n = Math.pow(2, zoom);
+    var x = (lon + 180) / 360 * n * MAP_TILE_SIZE;
+    var latRad = lat * Math.PI / 180;
+    var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n * MAP_TILE_SIZE;
+    return {x:x, y:y};
+  }
+  function loadTileImage(zoom, tx, ty, n){
+    return new Promise(function(resolve){
+      if(ty < 0 || ty >= n){ resolve(null); return; }
+      var wrapped = ((tx % n) + n) % n;
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function(){ resolve(img); };
+      img.onerror = function(){ resolve(null); };
+      img.src = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/' + zoom + '/' + ty + '/' + wrapped;
+    });
+  }
+  function drawMapPin(ctx, cx, cy){
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + 3, 7, 3, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx - 7, cy - 6);
+    ctx.lineTo(cx, cy + 3);
+    ctx.lineTo(cx + 7, cy - 6);
+    ctx.closePath();
+    ctx.fillStyle = '#E4572E';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy - 15, 10, 0, Math.PI * 2);
+    ctx.fillStyle = '#E4572E';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy - 15, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.restore();
+  }
+  function drawMapAttribution(ctx){
+    var text = 'Esri, Maxar';
+    ctx.save();
+    ctx.font = '10px sans-serif';
+    var w = ctx.measureText(text).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(4, MAP_CANVAS_H - 16, w + 8, 14);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, 8, MAP_CANVAS_H - 6);
+    ctx.restore();
+  }
+  function buildSatelliteMap(lat, lon){
+    var zoom = MAP_TILE_ZOOM;
+    var n = Math.pow(2, zoom);
+    var center = lonLatToWorldPx(lat, lon, zoom);
+    var topLeftX = center.x - MAP_CANVAS_W / 2;
+    var topLeftY = center.y - MAP_CANVAS_H / 2;
+    var firstTx = Math.floor(topLeftX / MAP_TILE_SIZE);
+    var firstTy = Math.floor(topLeftY / MAP_TILE_SIZE);
+    var lastTx = Math.floor((topLeftX + MAP_CANVAS_W) / MAP_TILE_SIZE);
+    var lastTy = Math.floor((topLeftY + MAP_CANVAS_H) / MAP_TILE_SIZE);
+    var tileJobs = [];
+    for(var tx = firstTx; tx <= lastTx; tx++){
+      for(var ty = firstTy; ty <= lastTy; ty++){
+        tileJobs.push({tx:tx, ty:ty});
+      }
+    }
+    var loadAll = Promise.all(tileJobs.map(function(t){
+      return loadTileImage(zoom, t.tx, t.ty, n).then(function(img){ return {tx:t.tx, ty:t.ty, img:img}; });
+    }));
+    var watchdog = new Promise(function(resolve){ setTimeout(function(){ resolve(null); }, MAP_WATCHDOG_MS); });
+    return Promise.race([loadAll, watchdog]).then(function(tiles){
+      if(!tiles) throw new Error('map-timeout');
+      var okCount = tiles.filter(function(t){ return !!t.img; }).length;
+      if(okCount === 0) throw new Error('map-unavailable');
+      var canvas = document.createElement('canvas');
+      canvas.width = MAP_CANVAS_W; canvas.height = MAP_CANVAS_H;
+      var ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#cfd8dc';
+      ctx.fillRect(0, 0, MAP_CANVAS_W, MAP_CANVAS_H);
+      tiles.forEach(function(t){
+        if(!t.img) return;
+        var px = t.tx * MAP_TILE_SIZE - topLeftX;
+        var py = t.ty * MAP_TILE_SIZE - topLeftY;
+        try{ ctx.drawImage(t.img, px, py); }catch(e){}
+      });
+      drawMapPin(ctx, MAP_CANVAS_W / 2, MAP_CANVAS_H / 2);
+      drawMapAttribution(ctx);
+      // toDataURL leve une SecurityError si une des tuiles a "souille" le
+      // canvas (probleme CORS cote serveur de tuiles) : dans ce cas on
+      // considere la carte indisponible plutot que de planter le rendu.
+      return encodeJpegUnderSize(canvas, MAX_PHOTO_BYTES);
+    });
+  }
+  function generateMap(lat, lon){
+    state.mapMeta = {status:'pending', dataUrl:null, lat:lat, lon:lon, manual:false};
+    render();
+    buildSatelliteMap(lat, lon).then(function(dataUrl){
+      state.mapMeta = {status:'ready', dataUrl:dataUrl, lat:lat, lon:lon, manual:false};
+      render();
+    }).catch(function(){
+      state.mapMeta = {status:'unavailable', dataUrl:null, lat:lat, lon:lon, manual:false};
+      render();
+    });
+  }
+  // Chargement d'une image choisie manuellement par l'utilisatrice (capture
+  // d'ecran de sa position, prise elle-meme dans l'app Plans par exemple)
+  // quand la carte automatique est indisponible. Contrairement aux photos du
+  // terrain, une capture d'ecran peut tres bien etre en format portrait :
+  // on ne rejette donc pas ce format ici (voir fileToDataURL pour les
+  // photos, qui elle l'exige en paysage).
+  function mapFileToDataURL(file, maxDim){
+    return loadImageSource(file).then(function(src){
+      var w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
+      var scale = Math.min(1, maxDim / Math.max(w, h));
+      var cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+      var canvas = document.createElement('canvas');
+      canvas.width = cw; canvas.height = ch;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(src, 0, 0, cw, ch);
+      return encodeJpegUnderSize(canvas, MAX_PHOTO_BYTES);
+    });
+  }
+  function handleMapFilePicked(file){
+    if(!file) return;
+    mapFileToDataURL(file, 1000).then(function(dataUrl){
+      state.mapMeta = {
+        status: 'ready',
+        dataUrl: dataUrl,
+        lat: state.mapMeta ? state.mapMeta.lat : null,
+        lon: state.mapMeta ? state.mapMeta.lon : null,
+        manual: true
+      };
+      render();
+      toast('Image chargee comme carte du point.');
+    }).catch(function(){
+      toast('Impossible de charger cette image.');
+    });
+  }
+
   /* ---------- file export ----------
      This app is meant to be opened as a plain local file (or from any plain
      web host), not just inside a Claude viewer — so file export must work
@@ -680,6 +839,7 @@
     editingId: null,
     annotators: {},
     photoMeta: {close:null, env1:null, env2:null},
+    mapMeta: null,
     bubbleValue: null,
     cadence10sOk: false,
     busySlots: {},
@@ -704,6 +864,7 @@
     state.editingId = null;
     state.annotators = {};
     state.photoMeta = {close:null, env1:null, env2:null};
+    state.mapMeta = null;
     state.bubbleValue = null;
     state.cadence10sOk = false;
     state.locationPromises = {};
@@ -801,28 +962,12 @@
       body = '<div class="photo-preview"><img src="' + meta.dataUrl + '" alt="">' +
         '<button type="button" class="photo-retake" data-action="pick-photo" data-slot="' + slot + '">Reprendre</button></div>';
     }
-    var metaLine;
-    if(!hasPhoto){
-      metaLine = '<div class="photo-meta is-empty"><span>Position : en attente de la photo</span></div>';
-    } else if(state.busySlots[slot]){
-      metaLine = '<div class="photo-meta"><span>&#128205; Localisation en cours&hellip;</span></div>';
-    } else {
-      var coordsText = fmtCoords(meta.coords);
-      if(!meta.coords && meta.locationError){
-        coordsText += ' &mdash; ' + escapeHtml(geoErrorLabel(meta.locationError));
-        // Detail technique affiche entre parentheses pour le diagnostic en
-        // cours : le temps ecoule et si la reponse vient de l'API native du
-        // telephone ou du filet de securite de l'app (voir v16/v17). Utile
-        // a l'utilisatrice pour nous le rapporter tel quel.
-        if(meta.locationDebug && typeof meta.locationDebug.elapsedMs === 'number'){
-          var secs = Math.round(meta.locationDebug.elapsedMs / 1000);
-          var srcLabel = meta.locationDebug.source === 'watchdog' ? 'app, aucune reponse du telephone' : 'telephone';
-          coordsText += ' (' + secs + ' s, reponse : ' + srcLabel + ')';
-        }
-      }
-      metaLine = '<div class="photo-meta"><span>&#128205; ' + coordsText + '</span>' +
-        '<button type="button" data-action="retry-location" data-slot="' + slot + '">Relocaliser</button></div>';
-    }
+    // La position brute (texte lat/lon) n'est plus affichee sous chaque
+    // photo depuis la v18 : une seule carte satellite pour toute la fiche
+    // (voir mapCardHtml, generee a partir de cette photo pour le slot
+    // "close") la remplace. La position est toujours capturee en arriere-
+    // plan pour chaque photo (utile pour le CSV), simplement plus montree ici.
+    var metaLine = '';
     var toolbar = '';
     if(allowAnnotate && hasPhoto){
       var ann = normalizeAnnotations((state.annotators[slot] && state.annotators[slot].annotations));
@@ -851,6 +996,32 @@
       '<button type="button" data-action="clear-annotation" data-slot="' + slot + '" data-kind="' + kind + '" data-index="' + index + '">effacer</button></span></div>';
   }
 
+  function mapCardHtml(){
+    var m = state.mapMeta;
+    var body;
+    if(!m || m.status === 'idle'){
+      body = '<div class="hint">La carte apparaitra ici une fois la photo de pres prise et la position obtenue.</div>';
+    } else if(m.status === 'pending'){
+      body = '<div class="hint">Generation de la carte&hellip;</div>';
+    } else if(m.status === 'ready'){
+      body = '<div class="detail-photo"><img src="' + m.dataUrl + '" alt="Carte du point"></div>' +
+        (m.manual ? '<div class="hint" style="margin-top:6px;">Image chargee manuellement.</div>' : '') +
+        '<div style="display:flex;gap:8px;margin-top:8px;">' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-map">Regenerer</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="pick-map-image">Charger une image</button>' +
+        '</div>';
+    } else {
+      body = '<div class="hint">&#9888; Carte indisponible (reseau ou position introuvable). Vous pouvez reessayer, ou charger vous-meme une capture d\'ecran de votre position (ex: app Plans).</div>' +
+        '<div style="display:flex;gap:8px;margin-top:8px;">' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-map">Reessayer</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="pick-map-image">Charger une image</button>' +
+        '</div>';
+    }
+    return '<div class="section"><div class="section-title">Carte du point</div>' + body +
+      '<input type="file" accept="image/*" style="display:none" data-role="map-file-input">' +
+      '</div>';
+  }
+
   function renderForm(){
     var d = draft;
     var bubbleGood = state.bubbleValue === 'ok';
@@ -869,6 +1040,7 @@
       '</div>' +
 
       photoBlockHtml('close', 'Photo de pres du point', false) +
+      mapCardHtml() +
 
       '<div class="section">' +
         '<div class="section-title">Donnees de l\'instrument GPS</div>' +
@@ -961,10 +1133,23 @@
       }
       return '<div class="section"><div class="section-title">' + title + '</div>' +
         '<div class="detail-photo"><img src="' + p.dataUrl + '" alt=""></div>' +
-        '<div class="coord-line"><span>&#128205; ' + fmtCoords(p.coords) + '</span>' +
-          (p.coords ? '<button data-action="copy-coords" data-text="' + escapeHtml(fmtCoordsPlain(p.coords)) + '">Copier</button>' : '') +
-        '</div>' + extra + '</div>';
+        extra + '</div>';
     };
+    var mapSection = (function(){
+      var m = e.map;
+      if(!m || !m.dataUrl){
+        return '<div class="section"><div class="section-title">Carte du point</div><div class="hint">Aucune carte enregistree pour cette fiche.</div></div>';
+      }
+      var coordsLine = (typeof m.lat === 'number' && typeof m.lon === 'number')
+        ? '<div class="coord-line"><span>&#128205; ' + fmtCoordsPlain({lat:m.lat, lon:m.lon}) + '</span>' +
+          '<button data-action="copy-coords" data-text="' + escapeHtml(m.lat.toFixed(6) + ', ' + m.lon.toFixed(6)) + '">Copier</button></div>'
+        : '';
+      return '<div class="section"><div class="section-title">Carte du point</div>' +
+        '<div class="detail-photo"><img src="' + m.dataUrl + '" alt="Carte du point"></div>' +
+        coordsLine +
+        (m.manual ? '<div class="hint" style="margin-top:6px;">Image chargee manuellement.</div>' : '') +
+        '</div>';
+    })();
     var dev = e.device || {};
     var bubbleChip = dev.bubble === 'ok' ? '<span class="chip chip-good">&#10003; Bulle centree</span>'
       : dev.bubble === 'ko' ? '<span class="chip chip-warn">&#9888; Bulle decalee</span>'
@@ -980,6 +1165,7 @@
         (e.remarks ? '<div class="kv"><span class="k">Remarques</span><span class="v">' + escapeHtml(e.remarks) + '</span></div>' : '') +
       '</div>' +
       photoCard('close', 'Photo de pres') +
+      mapSection +
       '<div class="section">' +
         '<div class="section-title">Instrument GPS</div>' +
         '<div class="kv"><span class="k">Hauteur d\'appareil</span><span class="v">' + (dev.height ? escapeHtml(dev.height) + ' m' : '&mdash;') + '</span></div>' +
@@ -1023,6 +1209,9 @@
     draft.device = Object.assign({height:'',serial:'',timeStart:'',timeEnd:'',bubbleNote:''}, e.device||{});
     state.bubbleValue = (e.device && e.device.bubble) || null;
     state.cadence10sOk = !!(e.device && e.device.cadence10s);
+    state.mapMeta = (e.map && e.map.dataUrl)
+      ? {status:'ready', dataUrl: e.map.dataUrl, lat: e.map.lat, lon: e.map.lon, manual: !!e.map.manual}
+      : null;
     ['close','env1','env2'].forEach(function(slot){
       if(e.photos && e.photos[slot]){
         var src = e.photos[slot];
@@ -1061,6 +1250,12 @@
       }
       state.busySlots[slot] = false;
       delete state.locationPromises[slot];
+      // C'est la photo de pres du point qui declenche la generation de la
+      // carte satellite unique de la fiche (voir mapCardHtml / generateMap).
+      if(slot === 'close'){
+        if(loc.coords) generateMap(loc.coords.lat, loc.coords.lon);
+        else { state.mapMeta = {status:'unavailable', dataUrl:null, lat:null, lon:null, manual:false}; }
+      }
       render();
     }).catch(function(err){
       state.busySlots[slot] = false;
@@ -1085,6 +1280,10 @@
       state.photoMeta[slot].locationDebug = {elapsedMs: loc.elapsedMs, source: loc.source};
       state.busySlots[slot] = false;
       delete state.locationPromises[slot];
+      if(slot === 'close'){
+        if(loc.coords) generateMap(loc.coords.lat, loc.coords.lon);
+        else { state.mapMeta = {status:'unavailable', dataUrl:null, lat:null, lon:null, manual:false}; }
+      }
       render();
     });
   }
@@ -1213,7 +1412,10 @@
         cadence10s: state.cadence10sOk,
         bubble: state.bubbleValue, bubbleNote: draft.device.bubbleNote
       },
-      photos: photos
+      photos: photos,
+      map: (state.mapMeta && state.mapMeta.dataUrl)
+        ? {dataUrl: state.mapMeta.dataUrl, lat: state.mapMeta.lat, lon: state.mapMeta.lon, manual: !!state.mapMeta.manual}
+        : null
     };
 
     // Keep this fiche on the device right away — the app has no shared
@@ -1290,6 +1492,7 @@
     var jobs = [];
     var base = (e.pointName || 'point').replace(/[^a-z0-9_-]+/gi, '_');
     if(e.photos && e.photos.close) jobs.push({filename: base + '_photo_pres.jpg', label: 'Photo de pres', dataUrl: e.photos.close.dataUrl});
+    if(e.map && e.map.dataUrl) jobs.push({filename: base + '_carte.jpg', label: 'Carte du point', dataUrl: e.map.dataUrl});
     if(e.photos && e.photos.env1){
       if(e.photos.env1.raw) jobs.push({filename: base + '_env1_brute.jpg', label: 'Environnement 1 (brute)', dataUrl: e.photos.env1.raw});
       jobs.push({filename: base + '_env1_annotee.jpg', label: 'Environnement 1 (cotee)', dataUrl: e.photos.env1.dataUrl});
@@ -1544,6 +1747,18 @@
       if(input) input.click();
     }
     else if(action === 'retry-location') retryLocation(el.dataset.slot);
+    else if(action === 'retry-map'){
+      var mm = state.mapMeta;
+      if(mm && typeof mm.lat === 'number' && typeof mm.lon === 'number'){
+        generateMap(mm.lat, mm.lon);
+      } else {
+        retryLocation('close');
+      }
+    }
+    else if(action === 'pick-map-image'){
+      var mapInput = qs('input[data-role="map-file-input"]');
+      if(mapInput) mapInput.click();
+    }
     else if(action === 'toggle-bubble'){
       state.bubbleValue = state.bubbleValue === el.dataset.value ? null : el.dataset.value;
       render();
@@ -1591,6 +1806,10 @@
       var ficheFile = el.files && el.files[0];
       el.value = '';
       if(ficheFile) importEntryFromFile(ficheFile);
+    } else if(el.matches('input[data-role="map-file-input"]')){
+      var mapFile = el.files && el.files[0];
+      el.value = '';
+      if(mapFile) handleMapFilePicked(mapFile);
     }
   });
 
