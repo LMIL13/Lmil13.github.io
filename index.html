@@ -286,7 +286,7 @@
           '</div>' +
         '</div>' +
       '</div>';
-    qs('.modal-overlay', root).addEventListener('click', function(e){ if(e.target.dataset.close) closeModal(); });
+    qs('.modal-overlay', root).addEventListener('click', function(e){ if(e.target.dataset.close){ closeModal(); if(opts.onCancel) opts.onCancel(); } });
     qs('#modal-confirm2', root).addEventListener('click', function(){ closeModal(); opts.onConfirm(); });
   }
 
@@ -483,17 +483,26 @@
     }
     return dataUrl;
   }
-  function fileToDataURL(file, maxDim, enforceLandscape){
+  // orientationMode:
+  //  - 'strict'  : rejette (Promise rejetee, err.code='portrait') toute image
+  //                portrait. Utilise pour les 2 photos d'environnement, prises
+  //                a l'horizon ou l'orientation du capteur est fiable.
+  //  - 'confirm' : n'impose rien mais renvoie {dataUrl, isPortrait} pour que
+  //                l'appelant puisse demander confirmation avant d'accepter.
+  //                Utilise pour la photo de pres : viser le sol (telephone
+  //                incline a plat au-dessus du point) prive le capteur
+  //                d'orientation de reference verticale fiable, si bien
+  //                qu'une photo prise telephone bien tenu en paysage peut
+  //                malgre tout ressortir "portrait" en pixels (remarque
+  //                terrain de l'utilisatrice) — mais une vraie photo prise
+  //                telephone tenu en portrait doit quand meme etre signalee,
+  //                d'ou la confirmation plutot qu'une acceptation silencieuse.
+  //  - sinon     : aucune verification.
+  function fileToDataURL(file, maxDim, orientationMode){
     return loadImageSource(file).then(function(src){
       var w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
-      // La photo de pres est prise en visant le sol (telephone incline a
-      // plat au-dessus du point) : sans reference verticale claire pour le
-      // capteur d'orientation, le telephone peut malgre tout enregistrer
-      // l'image comme "portrait" meme quand il est physiquement tenu a
-      // l'horizontale, comme releve par l'utilisatrice. On n'impose donc
-      // le format paysage que sur les photos d'environnement (prises a
-      // l'horizon, ou l'orientation est fiable), pas sur la photo de pres.
-      if(enforceLandscape && h >= w){
+      var isPortrait = h >= w;
+      if(orientationMode === 'strict' && isPortrait){
         var err = new Error('portrait-photo');
         err.code = 'portrait';
         throw err;
@@ -504,7 +513,9 @@
       canvas.width = cw; canvas.height = ch;
       var ctx = canvas.getContext('2d');
       ctx.drawImage(src, 0, 0, cw, ch);
-      return encodeJpegUnderSize(canvas, MAX_PHOTO_BYTES);
+      var dataUrl = encodeJpegUnderSize(canvas, MAX_PHOTO_BYTES);
+      if(orientationMode === 'confirm') return {dataUrl: dataUrl, isPortrait: isPortrait};
+      return dataUrl;
     });
   }
   function dataURLtoBlob(dataUrl){
@@ -1272,10 +1283,37 @@
     showView('form');
   }
 
+  // Pour la photo de pres, une image portrait n'est pas rejetee d'office
+  // (cf. fileToDataURL) mais elle n'est pas non plus acceptee en silence :
+  // on demande confirmation, pour laisser passer une vraie prise a plat
+  // tout en repoussant une photo reellement prise telephone en portrait.
+  function confirmPortraitClosePhoto(){
+    return new Promise(function(resolve, reject){
+      openConfirmModal({
+        title: 'Photo au format portrait',
+        message: 'Cette photo est enregistree au format portrait. Si le telephone etait bien tenu a l\'horizontale (paysage) mais incline a plat vers le sol pour photographier le point, c\'est normal : vous pouvez la valider. Sinon, reprenez la photo en tenant le telephone a l\'horizontale.',
+        confirmLabel: 'Valider quand meme',
+        cancelLabel: 'Reprendre la photo',
+        onConfirm: function(){ resolve(); },
+        onCancel: function(){ reject(); }
+      });
+    });
+  }
   function handleFilePicked(slot, file){
     if(!file) return;
     state.busySlots[slot] = true;
-    fileToDataURL(file, 1100, slot !== 'close').then(function(dataUrl){
+    var orientationMode = slot === 'close' ? 'confirm' : 'strict';
+    fileToDataURL(file, 1100, orientationMode).then(function(result){
+      if(slot !== 'close') return result;
+      if(!result.isPortrait) return result.dataUrl;
+      return confirmPortraitClosePhoto().then(function(){
+        return result.dataUrl;
+      }, function(){
+        var err = new Error('portrait-declined');
+        err.code = 'portrait-declined';
+        throw err;
+      });
+    }).then(function(dataUrl){
       state.photoMeta[slot] = {dataUrl: dataUrl, coords: null, takenAt: new Date().toISOString()};
       delete state.annotators[slot];
       render();
@@ -1307,6 +1345,8 @@
       delete state.locationPromises[slot];
       if(err && err.code === 'portrait'){
         toast('Photo refusee : elle doit etre prise en format paysage (telephone a l\'horizontale). Reessayez.');
+      } else if(err && err.code === 'portrait-declined'){
+        toast('Photo non enregistree. Reprenez-la en tenant le telephone a l\'horizontale.');
       } else {
         toast('Impossible de charger cette photo.');
       }
