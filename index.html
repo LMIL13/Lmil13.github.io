@@ -483,10 +483,17 @@
     }
     return dataUrl;
   }
-  function fileToDataURL(file, maxDim){
+  function fileToDataURL(file, maxDim, enforceLandscape){
     return loadImageSource(file).then(function(src){
       var w = src.width || src.naturalWidth, h = src.height || src.naturalHeight;
-      if(h >= w){
+      // La photo de pres est prise en visant le sol (telephone incline a
+      // plat au-dessus du point) : sans reference verticale claire pour le
+      // capteur d'orientation, le telephone peut malgre tout enregistrer
+      // l'image comme "portrait" meme quand il est physiquement tenu a
+      // l'horizontale, comme releve par l'utilisatrice. On n'impose donc
+      // le format paysage que sur les photos d'environnement (prises a
+      // l'horizon, ou l'orientation est fiable), pas sur la photo de pres.
+      if(enforceLandscape && h >= w){
         var err = new Error('portrait-photo');
         err.code = 'portrait';
         throw err;
@@ -630,13 +637,24 @@
   function generateMap(lat, lon){
     state.mapMeta = {status:'pending', dataUrl:null, lat:lat, lon:lon, manual:false};
     render();
-    buildSatelliteMap(lat, lon).then(function(dataUrl){
+    // Meme logique que state.locationPromises : on garde une reference a
+    // cette generation en cours pour que performSave() puisse l'attendre
+    // (bornee par le filet de securite de buildSatelliteMap, 12 s max) au
+    // lieu de sauvegarder une fiche sans carte ni coordonnees si
+    // l'utilisatrice enregistre juste avant la fin du telechargement des
+    // tuiles (bug reel constate : la carte n'apparaissait pas sur les
+    // fiches enregistrees rapidement).
+    var p = buildSatelliteMap(lat, lon).then(function(dataUrl){
       state.mapMeta = {status:'ready', dataUrl:dataUrl, lat:lat, lon:lon, manual:false};
       render();
     }).catch(function(){
       state.mapMeta = {status:'unavailable', dataUrl:null, lat:lat, lon:lon, manual:false};
       render();
+    }).then(function(){
+      if(state.mapPromise === p) state.mapPromise = null;
     });
+    state.mapPromise = p;
+    return p;
   }
   // Chargement d'une image choisie manuellement par l'utilisatrice (capture
   // d'ecran de sa position, prise elle-meme dans l'app Plans par exemple)
@@ -658,7 +676,7 @@
   }
   function handleMapFilePicked(file){
     if(!file) return;
-    mapFileToDataURL(file, 1000).then(function(dataUrl){
+    var p = mapFileToDataURL(file, 1000).then(function(dataUrl){
       state.mapMeta = {
         status: 'ready',
         dataUrl: dataUrl,
@@ -670,7 +688,10 @@
       toast('Image chargee comme carte du point.');
     }).catch(function(){
       toast('Impossible de charger cette image.');
+    }).then(function(){
+      if(state.mapPromise === p) state.mapPromise = null;
     });
+    state.mapPromise = p;
   }
 
   /* ---------- file export ----------
@@ -843,6 +864,7 @@
     annotators: {},
     photoMeta: {close:null, env1:null, env2:null},
     mapMeta: null,
+    mapPromise: null,
     bubbleValue: null,
     cadence10sOk: false,
     busySlots: {},
@@ -868,6 +890,7 @@
     state.annotators = {};
     state.photoMeta = {close:null, env1:null, env2:null};
     state.mapMeta = null;
+    state.mapPromise = null;
     state.bubbleValue = null;
     state.cadence10sOk = false;
     state.locationPromises = {};
@@ -955,9 +978,12 @@
     var hasPhoto = meta && meta.dataUrl;
     var body;
     if(!hasPhoto){
+      var hint = slot === 'close'
+        ? 'Vous pouvez incliner le telephone vers le sol pour cette photo'
+        : 'Format paysage obligatoire (telephone a l\'horizontale)';
       body = '<div class="photo-drop" data-action="pick-photo" data-slot="' + slot + '">' +
         '<div class="icon">&#128247;</div><span>Ajouter une photo</span>' +
-        '<span class="photo-hint">Format paysage obligatoire (telephone a l\'horizontale)</span></div>';
+        '<span class="photo-hint">' + hint + '</span></div>';
     } else if(allowAnnotate){
       body = '<div class="photo-preview"><canvas data-slot="' + slot + '"></canvas>' +
         '<button type="button" class="photo-retake" data-action="pick-photo" data-slot="' + slot + '">Reprendre</button></div>';
@@ -1001,26 +1027,42 @@
 
   function mapCardHtml(){
     var m = state.mapMeta;
+    var hasClosePhoto = !!(state.photoMeta.close && state.photoMeta.close.dataUrl);
+    // Les coordonnees precises restent affichees a cote de la carte (demande
+    // explicite de l'utilisatrice apres la v18/v19) : la carte donne le
+    // repere visuel, le texte garde la valeur exacte utilisable/copiable.
+    // generateMap() fixe lat/lon des le debut (etat "pending"), donc elles
+    // sont disponibles meme si la carte finit "indisponible".
+    var coordsLine = (m && typeof m.lat === 'number' && typeof m.lon === 'number')
+      ? '<div class="coord-line"><span>&#128205; ' + fmtCoordsPlain({lat:m.lat, lon:m.lon}) + '</span>' +
+        '<button type="button" data-action="copy-coords" data-text="' + escapeHtml(m.lat.toFixed(6) + ', ' + m.lon.toFixed(6)) + '">Copier</button></div>'
+      : '';
     var body;
-    if(!m || m.status === 'idle'){
+    if(!hasClosePhoto){
       body = '<div class="hint">La carte apparaitra ici une fois la photo de pres prise et la position obtenue.</div>';
+    } else if(!m || m.status === 'idle'){
+      body = '<div class="hint">En attente de la position pour generer la carte&hellip;</div>' + coordsLine;
     } else if(m.status === 'pending'){
-      body = '<div class="hint">Generation de la carte&hellip;</div>';
+      body = '<div class="hint">Generation de la carte&hellip;</div>' + coordsLine;
     } else if(m.status === 'ready'){
       body = '<div class="detail-photo"><img src="' + m.dataUrl + '" alt="Carte du point"></div>' +
-        (m.manual ? '<div class="hint" style="margin-top:6px;">Image chargee manuellement.</div>' : '') +
-        '<div style="display:flex;gap:8px;margin-top:8px;">' +
-          '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-map">Regenerer</button>' +
-          '<button type="button" class="btn btn-secondary btn-sm" data-action="pick-map-image">Charger une image</button>' +
-        '</div>';
+        coordsLine +
+        (m.manual ? '<div class="hint" style="margin-top:6px;">Image chargee manuellement.</div>' : '');
     } else {
       body = '<div class="hint">&#9888; Carte indisponible (reseau ou position introuvable). Vous pouvez reessayer, ou charger vous-meme une capture d\'ecran de votre position (ex: app Plans).</div>' +
-        '<div style="display:flex;gap:8px;margin-top:8px;">' +
-          '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-map">Reessayer</button>' +
-          '<button type="button" class="btn btn-secondary btn-sm" data-action="pick-map-image">Charger une image</button>' +
-        '</div>';
+        coordsLine;
     }
-    return '<div class="section"><div class="section-title">Carte du point</div>' + body +
+    // Les boutons sont disponibles des qu'il y a une photo de pres (demande
+    // explicite de l'utilisatrice), sans attendre que la carte automatique
+    // ait fini de se generer : elle peut ainsi charger elle-meme une image
+    // tout de suite si elle ne veut pas attendre le reseau sur le terrain.
+    var buttons = hasClosePhoto
+      ? '<div style="display:flex;gap:8px;margin-top:8px;">' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="retry-map">' + (m && m.status === 'ready' ? 'Regenerer' : 'Generer / Reessayer') + '</button>' +
+          '<button type="button" class="btn btn-secondary btn-sm" data-action="pick-map-image">Charger une image</button>' +
+        '</div>'
+      : '';
+    return '<div class="section"><div class="section-title">Carte du point</div>' + body + buttons +
       '<input type="file" accept="image/*" style="display:none" data-role="map-file-input">' +
       '</div>';
   }
@@ -1233,7 +1275,7 @@
   function handleFilePicked(slot, file){
     if(!file) return;
     state.busySlots[slot] = true;
-    fileToDataURL(file, 1100).then(function(dataUrl){
+    fileToDataURL(file, 1100, slot !== 'close').then(function(dataUrl){
       state.photoMeta[slot] = {dataUrl: dataUrl, coords: null, takenAt: new Date().toISOString()};
       delete state.annotators[slot];
       render();
@@ -1370,8 +1412,15 @@
     var pendingLocations = Object.keys(state.locationPromises).map(function(slot){
       return state.locationPromises[slot];
     });
-    if(pendingLocations.length) toast('Enregistrement en attente de la position...');
-    Promise.all(readyPromises.concat(pendingLocations)).then(function(){ finishSave(incomplete); });
+    // Meme raisonnement pour la carte satellite (v18) : sa generation est
+    // asynchrone (chargement des tuiles) et n'etait pas attendue avant cette
+    // correction, ce qui pouvait sauvegarder une fiche sans carte NI
+    // coordonnees si l'utilisatrice enregistrait juste avant la fin du
+    // telechargement (bug reel constate en usage). Bornee par le filet de
+    // securite de buildSatelliteMap (12 s max).
+    var pendingMap = state.mapPromise ? [state.mapPromise] : [];
+    if(pendingLocations.length || pendingMap.length) toast('Enregistrement en attente de la position/carte...');
+    Promise.all(readyPromises.concat(pendingLocations).concat(pendingMap)).then(function(){ finishSave(incomplete); });
   }
 
   function finishSave(incomplete){
@@ -1754,6 +1803,8 @@
       var mm = state.mapMeta;
       if(mm && typeof mm.lat === 'number' && typeof mm.lon === 'number'){
         generateMap(mm.lat, mm.lon);
+      } else if(state.locationPromises.close){
+        toast('Recherche de la position deja en cours...');
       } else {
         retryLocation('close');
       }
